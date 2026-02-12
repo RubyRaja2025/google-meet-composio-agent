@@ -9,7 +9,7 @@ from typing import Any
 import anthropic
 from composio import Composio
 
-from .auth import ensure_google_meet_connection
+from .auth import ensure_google_meet_connection, ensure_google_drive_connection
 from .config import Settings, get_settings
 from .exceptions import (
     AgentExecutionError,
@@ -175,6 +175,14 @@ class GoogleMeetAgent:
 
         # Ensure Google Meet connection (OAuth if needed)
         ensure_google_meet_connection(
+            composio=self._composio,
+            entity_id=self._entity_id,
+            timeout=self._settings.oauth_timeout,
+            open_browser=open_browser,
+        )
+
+        # Ensure Google Drive connection for Gemini notes (OAuth if needed)
+        ensure_google_drive_connection(
             composio=self._composio,
             entity_id=self._entity_id,
             timeout=self._settings.oauth_timeout,
