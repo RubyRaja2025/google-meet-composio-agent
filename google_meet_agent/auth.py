@@ -12,12 +12,23 @@ from .exceptions import (
     OAuthTimeoutError,
     ComposioConnectionError,
 )
+from .config import get_settings
 
 logger = logging.getLogger(__name__)
 
 # App names in Composio
 GOOGLEMEET_APP_NAME = "googlemeet"
 GOOGLEDRIVE_APP_NAME = "googledrive"
+
+
+def _is_new_sdk() -> bool:
+    """Check if using new SDK (v0.8+) based on available attributes."""
+    try:
+        # New SDK uses auth_configs, old SDK uses integrations
+        composio = Composio()
+        return hasattr(composio, 'auth_configs')
+    except Exception:
+        return True  # Default to new SDK behavior
 
 
 class GoogleAuthManager:
@@ -32,60 +43,109 @@ class GoogleAuthManager:
         """
         self._composio = composio
         self._app_name = app_name
-        self._integration_id: str | None = None
+        self._auth_config_id: str | None = None
+        self._new_sdk = _is_new_sdk()
 
-    def _get_integration_id(self) -> str:
-        """Get the integration ID for the app from Composio.
+    def _get_auth_config_id(self) -> str:
+        """Get the auth config ID for the app from Composio or config.
 
         Returns:
-            The integration ID (UUID) for the app.
+            The auth config ID for the app.
 
         Raises:
-            AuthConfigNotFoundError: If no integration found.
+            AuthConfigNotFoundError: If no auth config found.
         """
-        if self._integration_id:
-            return self._integration_id
+        if self._auth_config_id:
+            return self._auth_config_id
 
+        # Try to get from settings first
         try:
-            integrations = self._composio.integrations.get()
+            settings = get_settings()
+            if settings.composio_auth_config_id:
+                self._auth_config_id = settings.composio_auth_config_id
+                logger.info(f"Using auth config from settings: {self._auth_config_id}")
+                return self._auth_config_id
+        except Exception:
+            pass
 
-            for integ in integrations:
-                if getattr(integ, "appName", "") == self._app_name:
-                    self._integration_id = integ.id
-                    logger.info(f"Found {self._app_name} integration: {integ.id}")
-                    return integ.id
+        # Try to find from auth_configs (new SDK) or integrations (old SDK)
+        try:
+            if self._new_sdk:
+                # New SDK: use auth_configs
+                try:
+                    auth_configs = self._composio.auth_configs.list()
+                    configs = auth_configs.items if hasattr(auth_configs, 'items') else auth_configs
+                    for config in configs:
+                        toolkit_slug = getattr(config, "toolkit", {})
+                        if hasattr(toolkit_slug, "slug"):
+                            toolkit_slug = toolkit_slug.slug
+                        elif isinstance(toolkit_slug, dict):
+                            toolkit_slug = toolkit_slug.get("slug", "")
+                        else:
+                            toolkit_slug = str(toolkit_slug)
+                        if toolkit_slug.lower() == self._app_name.lower():
+                            self._auth_config_id = config.id
+                            logger.info(f"Found {self._app_name} auth config: {config.id}")
+                            return config.id
+                except AttributeError:
+                    logger.warning("auth_configs not available, trying legacy integrations")
+                    self._new_sdk = False
+
+            # Old SDK: use integrations
+            if not self._new_sdk:
+                integrations = self._composio.integrations.get()
+                for integ in integrations:
+                    if getattr(integ, "appName", "") == self._app_name:
+                        self._auth_config_id = integ.id
+                        logger.info(f"Found {self._app_name} integration: {integ.id}")
+                        return integ.id
 
             raise AuthConfigNotFoundError(
-                f"No {self._app_name} integration found. Create one at https://app.composio.dev"
+                f"No {self._app_name} auth config found. Create one at https://app.composio.dev"
             )
 
         except AuthConfigNotFoundError:
             raise
         except Exception as e:
-            logger.error(f"Error finding {self._app_name} integration: {e}")
+            logger.error(f"Error finding {self._app_name} auth config: {e}")
             raise AuthConfigNotFoundError(
-                f"Failed to find {self._app_name} integration: {e}",
+                f"Failed to find {self._app_name} auth config: {e}",
                 cause=e,
             )
 
-    def get_existing_connection(self, entity_id: str) -> Any | None:
+    def get_existing_connection(self, user_id: str) -> Any | None:
         """Check for an existing active connection.
 
         Args:
-            entity_id: The entity ID (user identifier) to check.
+            user_id: The user ID (user identifier) to check.
 
         Returns:
             The connected account if found, None otherwise.
         """
         try:
-            # Get active connected accounts for this entity
-            accounts = self._composio.connected_accounts.get(
-                entity_ids=[entity_id],
-                active=True,
-            )
+            accounts = None
+
+            if self._new_sdk:
+                # New SDK: use list() with user_ids and statuses
+                try:
+                    result = self._composio.connected_accounts.list(
+                        user_ids=[user_id],
+                        statuses=["ACTIVE"],
+                    )
+                    accounts = result.items if hasattr(result, 'items') else result
+                except TypeError:
+                    # Fall back to old SDK
+                    self._new_sdk = False
+
+            if not self._new_sdk:
+                # Old SDK: use get() with entity_ids
+                accounts = self._composio.connected_accounts.get(
+                    entity_ids=[user_id],
+                    active=True,
+                )
 
             if not accounts:
-                logger.debug(f"No active connections found for entity: {entity_id}")
+                logger.debug(f"No active connections found for user: {user_id}")
                 return None
 
             # Handle single account or list
@@ -94,12 +154,20 @@ class GoogleAuthManager:
 
             # Find connection for this app
             for account in accounts:
-                app_name = getattr(account, "appName", "") or getattr(account, "app_name", "")
+                # Try different attribute names for app name
+                app_name = ""
+                if hasattr(account, "toolkit") and hasattr(account.toolkit, "slug"):
+                    app_name = account.toolkit.slug
+                elif hasattr(account, "appName"):
+                    app_name = account.appName
+                elif hasattr(account, "app_name"):
+                    app_name = account.app_name
+
                 if app_name.lower() == self._app_name.lower():
-                    logger.info(f"Found existing {self._app_name} connection for entity: {entity_id}")
+                    logger.info(f"Found existing {self._app_name} connection for user: {user_id}")
                     return account
 
-            logger.debug(f"No {self._app_name} connection found for entity: {entity_id}")
+            logger.debug(f"No {self._app_name} connection found for user: {user_id}")
             return None
 
         except Exception as e:
@@ -108,33 +176,42 @@ class GoogleAuthManager:
 
     def initiate_oauth(
         self,
-        entity_id: str,
+        user_id: str,
         open_browser: bool = True,
     ) -> Any:
         """Initiate OAuth flow for a new connection.
 
         Args:
-            entity_id: The entity ID (user identifier) to connect.
+            user_id: The user ID (user identifier) to connect.
             open_browser: Whether to automatically open the browser.
 
         Returns:
-            Connection request object with redirectUrl.
+            Connection request object with redirect_url.
 
         Raises:
-            AuthConfigNotFoundError: If integration not found.
+            AuthConfigNotFoundError: If auth config not found.
         """
         try:
-            integration_id = self._get_integration_id()
-            logger.info(f"Initiating OAuth for {self._app_name}, entity: {entity_id}")
+            auth_config_id = self._get_auth_config_id()
+            logger.info(f"Initiating OAuth for {self._app_name}, user: {user_id}")
 
             # Initiate the connection request
-            connection_request = self._composio.connected_accounts.initiate(
-                integration_id=integration_id,
-                entity_id=entity_id,
-            )
+            if self._new_sdk:
+                connection_request = self._composio.connected_accounts.initiate(
+                    user_id=user_id,
+                    auth_config_id=auth_config_id,
+                )
+            else:
+                connection_request = self._composio.connected_accounts.initiate(
+                    integration_id=auth_config_id,
+                    entity_id=user_id,
+                )
 
-            # Get the redirect URL
-            redirect_url = getattr(connection_request, "redirectUrl", None)
+            # Get the redirect URL (try both new and old attribute names)
+            redirect_url = (
+                getattr(connection_request, "redirect_url", None) or
+                getattr(connection_request, "redirectUrl", None)
+            )
 
             if not redirect_url:
                 raise AuthConfigNotFoundError(
@@ -180,16 +257,24 @@ class GoogleAuthManager:
         logger.info(f"Waiting up to {timeout}s for OAuth completion...")
 
         try:
-            # Use Composio's built-in wait method
-            # API may require client parameter in some versions
-            try:
-                connected_account = connection_request.wait_until_active(
-                    client=self._composio,
-                    timeout=timeout,
-                )
-            except TypeError:
-                # Fallback for older API
-                connected_account = connection_request.wait_until_active(timeout=timeout)
+            connected_account = None
+
+            # Try wait_for_connection (new SDK) first
+            if hasattr(connection_request, "wait_for_connection"):
+                try:
+                    connected_account = connection_request.wait_for_connection(timeout=timeout)
+                except TypeError:
+                    connected_account = connection_request.wait_for_connection()
+
+            # Try wait_until_active (old SDK) if needed
+            if connected_account is None and hasattr(connection_request, "wait_until_active"):
+                try:
+                    connected_account = connection_request.wait_until_active(
+                        client=self._composio,
+                        timeout=timeout,
+                    )
+                except TypeError:
+                    connected_account = connection_request.wait_until_active(timeout=timeout)
 
             if connected_account:
                 logger.info("OAuth completed successfully!")
@@ -256,12 +341,15 @@ def ensure_google_meet_connection(
     print("Please sign in with your Google Workspace account.\n")
 
     connection_request = auth_manager.initiate_oauth(
-        entity_id=entity_id,
+        user_id=entity_id,
         open_browser=open_browser,
     )
 
     # Print URL in case browser didn't open
-    redirect_url = getattr(connection_request, "redirectUrl", "")
+    redirect_url = (
+        getattr(connection_request, "redirect_url", "") or
+        getattr(connection_request, "redirectUrl", "")
+    )
     print(f"If the browser didn't open, visit this URL:")
     print(f"\n  {redirect_url}\n")
     print("Waiting for authentication...")
@@ -317,12 +405,15 @@ def ensure_google_drive_connection(
     print("This is needed to fetch Gemini meeting notes.\n")
 
     connection_request = auth_manager.initiate_oauth(
-        entity_id=entity_id,
+        user_id=entity_id,
         open_browser=open_browser,
     )
 
     # Print URL in case browser didn't open
-    redirect_url = getattr(connection_request, "redirectUrl", "")
+    redirect_url = (
+        getattr(connection_request, "redirect_url", "") or
+        getattr(connection_request, "redirectUrl", "")
+    )
     print(f"If the browser didn't open, visit this URL:")
     print(f"\n  {redirect_url}\n")
     print("Waiting for authentication...")

@@ -238,24 +238,40 @@ def get_connected_account_id(
         The connected account ID or None.
     """
     try:
-        accounts = composio.connected_accounts.get(entity_ids=[entity_id], active=True)
+        accounts = None
+
+        # Try new SDK first (list with user_ids)
+        try:
+            result = composio.connected_accounts.list(
+                user_ids=[entity_id],
+                statuses=["ACTIVE"],
+            )
+            accounts = result.items if hasattr(result, 'items') else result
+        except (TypeError, AttributeError):
+            # Fall back to old SDK (get with entity_ids)
+            accounts = composio.connected_accounts.get(entity_ids=[entity_id], active=True)
+
         if not accounts:
             return None
 
         if not isinstance(accounts, list):
             accounts = [accounts]
 
+        # Helper to get app name from account
+        def get_app_name(acc):
+            if hasattr(acc, "toolkit") and hasattr(acc.toolkit, "slug"):
+                return acc.toolkit.slug
+            return getattr(acc, "appName", "") or getattr(acc, "app_name", "")
+
         # If specific app requested, find that account
         if app_name:
             for acc in accounts:
-                acc_app_name = getattr(acc, "appName", "") or getattr(acc, "app_name", "")
-                if acc_app_name.lower() == app_name.lower():
+                if get_app_name(acc).lower() == app_name.lower():
                     return acc.id
 
         # For Google Meet tools, prefer googlemeet account
         for acc in accounts:
-            acc_app_name = getattr(acc, "appName", "") or getattr(acc, "app_name", "")
-            if acc_app_name.lower() == GOOGLEMEET_APP_NAME:
+            if get_app_name(acc).lower() == GOOGLEMEET_APP_NAME:
                 return acc.id
 
         # If no specific account found, use the first one
