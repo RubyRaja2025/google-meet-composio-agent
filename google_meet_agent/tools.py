@@ -394,6 +394,7 @@ def execute_google_meet_tool(
                 tool_slug,
                 user_id=entity_id,
                 arguments=arguments or {},
+                dangerously_skip_version_check=True,
             )
         else:
             # Old SDK: use composio.actions.execute() with Action enum
