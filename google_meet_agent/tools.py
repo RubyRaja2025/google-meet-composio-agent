@@ -23,6 +23,11 @@ logger = logging.getLogger(__name__)
 GOOGLEMEET_APP_NAME = "googlemeet"
 GOOGLEDRIVE_APP_NAME = "googledrive"
 
+
+def _is_new_sdk(composio: Composio) -> bool:
+    """Check if using new SDK (v0.8+) based on available attributes."""
+    return hasattr(composio, 'tools') and not hasattr(composio, 'actions')
+
 # Expected Google Meet tools (READ-ONLY subset)
 EXPECTED_MEET_TOOLS = [
     "GOOGLEMEET_LIST_CONFERENCE_RECORDS",
@@ -96,6 +101,19 @@ def _tool_to_anthropic(tool: Any) -> dict[str, Any]:
         return {"name": str(tool), "description": "", "input_schema": {"type": "object", "properties": {}}}
 
 
+def _get_tools_for_app(composio: Composio, app_name: str, entity_id: str) -> Any:
+    """Get tools for an app, handling both old and new SDK versions."""
+    if _is_new_sdk(composio):
+        # New SDK: use composio.tools.get() with toolkits parameter
+        return composio.tools.get(
+            user_id=entity_id,
+            toolkits=[app_name],
+        )
+    else:
+        # Old SDK: use composio.actions.get() with apps parameter
+        return composio.actions.get(apps=[app_name])
+
+
 @retry(
     stop=stop_after_attempt(3),
     wait=wait_exponential(multiplier=1, min=1, max=10),
@@ -125,7 +143,7 @@ def get_google_meet_tools(
         anthropic_tools = []
 
         # Get Google Meet tools
-        meet_tools = composio.actions.get(apps=[GOOGLEMEET_APP_NAME])
+        meet_tools = _get_tools_for_app(composio, GOOGLEMEET_APP_NAME, entity_id)
         meet_tool_list = _extract_tool_list(meet_tools)
 
         meet_tool_names = []
@@ -141,7 +159,7 @@ def get_google_meet_tools(
         # Get Google Drive tools for Gemini notes (filtered subset)
         if include_drive:
             try:
-                drive_tools = composio.actions.get(apps=[GOOGLEDRIVE_APP_NAME])
+                drive_tools = _get_tools_for_app(composio, GOOGLEDRIVE_APP_NAME, entity_id)
                 drive_tool_list = _extract_tool_list(drive_tools)
 
                 drive_tool_names = []
@@ -332,8 +350,6 @@ def execute_google_meet_tool(
         GoogleMeetAPIError: If tool execution fails.
         RateLimitError: If rate limited.
     """
-    from composio.client.enums import Action
-
     try:
         logger.debug(f"Executing tool: {tool_slug} with args: {arguments}")
 
@@ -351,19 +367,28 @@ def execute_google_meet_tool(
                     status_code=401,
                 )
 
-        # Convert string to Action enum
-        try:
-            action = getattr(Action, tool_slug)
-        except AttributeError:
-            # Try with the slug as-is
-            action = Action(tool_slug)
+        # Execute using appropriate SDK version
+        if _is_new_sdk(composio):
+            # New SDK: use composio.tools.execute()
+            result = composio.tools.execute(
+                tool_slug,
+                user_id=entity_id,
+                arguments=arguments or {},
+            )
+        else:
+            # Old SDK: use composio.actions.execute() with Action enum
+            from composio.client.enums import Action
+            try:
+                action = getattr(Action, tool_slug)
+            except AttributeError:
+                action = Action(tool_slug)
 
-        result = composio.actions.execute(
-            action=action,
-            entity_id=entity_id,
-            connected_account=connected_account_id,
-            params=arguments or {},
-        )
+            result = composio.actions.execute(
+                action=action,
+                entity_id=entity_id,
+                connected_account=connected_account_id,
+                params=arguments or {},
+            )
 
         # Handle result
         if isinstance(result, dict):
