@@ -87,9 +87,31 @@ def _extract_tool_list(tools: Any) -> list:
         return list(tools) if hasattr(tools, "__iter__") else []
 
 
+def _get_tool_name(tool: Any) -> str:
+    """Extract tool name from various formats."""
+    if isinstance(tool, dict):
+        # New SDK format: {'function': {'name': '...'}, 'type': 'function'}
+        if "function" in tool and isinstance(tool["function"], dict):
+            return tool["function"].get("name", "")
+        # Old SDK format: {'name': '...'}
+        return tool.get("name", "")
+    elif hasattr(tool, "name"):
+        return tool.name
+    return str(tool)
+
+
 def _tool_to_anthropic(tool: Any) -> dict[str, Any]:
     """Convert a single tool to Anthropic format."""
     if isinstance(tool, dict):
+        # New SDK returns tools already in Anthropic format with 'function' key
+        if "function" in tool and isinstance(tool["function"], dict):
+            func = tool["function"]
+            return {
+                "name": func.get("name", "unknown"),
+                "description": func.get("description", ""),
+                "input_schema": func.get("parameters", {"type": "object", "properties": {}}),
+            }
+        # Old SDK format - convert directly
         return _convert_to_anthropic_format(tool)
     elif hasattr(tool, "model_dump"):
         return _convert_to_anthropic_format(tool.model_dump())
@@ -148,8 +170,7 @@ def get_google_meet_tools(
 
         meet_tool_names = []
         for tool in meet_tool_list:
-            name = getattr(tool, "name", None) or \
-                   (tool.get("name") if isinstance(tool, dict) else str(tool))
+            name = _get_tool_name(tool)
             if name:
                 meet_tool_names.append(name)
             anthropic_tools.append(_tool_to_anthropic(tool))
@@ -164,8 +185,7 @@ def get_google_meet_tools(
 
                 drive_tool_names = []
                 for tool in drive_tool_list:
-                    name = getattr(tool, "name", None) or \
-                           (tool.get("name") if isinstance(tool, dict) else str(tool))
+                    name = _get_tool_name(tool)
                     # Only include specific Drive tools needed for notes
                     if name and name in GOOGLEDRIVE_TOOLS_FOR_NOTES:
                         drive_tool_names.append(name)
