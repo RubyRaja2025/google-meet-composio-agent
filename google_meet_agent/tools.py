@@ -420,17 +420,39 @@ def execute_google_meet_tool(
 
             # Special handling for GOOGLEDRIVE_DOWNLOAD_FILE - fetch actual content
             if tool_slug == "GOOGLEDRIVE_DOWNLOAD_FILE":
-                downloaded = data.get("downloaded_file_content", {})
-                s3url = downloaded.get("s3url")
-                if s3url:
-                    logger.info("Fetching file content from temporary URL...")
-                    file_content = fetch_file_content_from_url(s3url)
-                    # Add the actual content to the response
+                downloaded = data.get("downloaded_file_content")
+                file_content = None
+
+                if isinstance(downloaded, str):
+                    # New SDK: downloaded_file_content is a local file path
+                    if downloaded.startswith("/") or downloaded.startswith("~"):
+                        try:
+                            import os
+                            file_path = os.path.expanduser(downloaded)
+                            if os.path.exists(file_path):
+                                logger.info(f"Reading file content from local path: {file_path}")
+                                with open(file_path, "r", encoding="utf-8") as f:
+                                    file_content = f.read()
+                        except Exception as e:
+                            logger.error(f"Error reading local file: {e}")
+                            file_content = f"Error reading file: {e}"
+                    else:
+                        # Could be a URL string
+                        logger.info("Fetching file content from URL...")
+                        file_content = fetch_file_content_from_url(downloaded)
+                elif isinstance(downloaded, dict):
+                    # Old SDK: downloaded_file_content is a dict with s3url
+                    s3url = downloaded.get("s3url")
+                    if s3url:
+                        logger.info("Fetching file content from temporary URL...")
+                        file_content = fetch_file_content_from_url(s3url)
+                        # Remove the S3 URL from response (it's temporary)
+                        if "downloaded_file_content" in data:
+                            del data["downloaded_file_content"]["s3url"]
+
+                if file_content:
                     data["file_content"] = file_content
                     data["content_fetched"] = True
-                    # Remove the S3 URL from response (it's temporary and not useful)
-                    if "downloaded_file_content" in data:
-                        del data["downloaded_file_content"]["s3url"]
 
             return {"success": True, "data": data}
         else:
